@@ -1,0 +1,12 @@
+{
+  "name": "marco-adamo-telegram-cloud",
+  "version": "1.0.0",
+  "description": "Secondo Cervello di Marco Adamo 24/7 Cloud Bot",
+  "main": "bot_node.js",
+  "scripts": {
+    "start": "node bot_node.js"
+  },
+  "dependencies": {
+    "@andresaya/edge-tts": "^1.9.1"
+  }
+}
