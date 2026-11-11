@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: marco-maestro-bot
+    runtime: node
+    plan: free
+    region: frankfurt
+    buildCommand: npm install
+    startCommand: node bot_node.js
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: TELEGRAM_TOKEN
+        value: 9175044056:AAHar1SCEmX1ScahnalgVmKLKMojW58a3X4
+      - key: GEMINI_API_KEY
+        value: AQ.Ab8RN6JkOqv6tkE4n0XJvD3LsdcW-3zt40hzyQpGnJnRgNqC5Q
