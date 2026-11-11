@@ -5,6 +5,22 @@ const https = require('https');
 const { execSync } = require('child_process');
 const { EdgeTTS } = require('@andresaya/edge-tts');
 
+let ffmpegPath = 'ffmpeg';
+try {
+    const staticFfmpeg = require('ffmpeg-static');
+    if (staticFfmpeg && fs.existsSync(staticFfmpeg)) {
+        ffmpegPath = staticFfmpeg;
+    }
+} catch (e) {}
+
+const recentLogs = [];
+function logMsg(msg) {
+    const line = `[${new Date().toLocaleTimeString('it-IT')}] ${msg}`;
+    console.log(line);
+    recentLogs.push(line);
+    if (recentLogs.length > 100) recentLogs.shift();
+}
+
 process.on('uncaughtException', (err) => {
     console.error('[UNCAUGHT EXCEPTION]:', err);
 });
@@ -258,7 +274,7 @@ async function generateGoogleVoice(text) {
                     const tmpRaw = path.join(__dirname, `gvoice_${Date.now()}.pcm`);
                     const tmpOgg = path.join(__dirname, `gvoice_${Date.now()}.ogg`);
                     fs.writeFileSync(tmpRaw, Buffer.from(b64, 'base64'));
-                    execSync(`ffmpeg -y -f s16le -ar 24000 -ac 1 -i "${tmpRaw}" -c:a libopus -b:a 64k "${tmpOgg}"`);
+                    execSync(`"${ffmpegPath}" -y -f s16le -ar 24000 -ac 1 -i "${tmpRaw}" -c:a libopus -b:a 64k "${tmpOgg}"`);
                     if (fs.existsSync(tmpRaw)) fs.unlinkSync(tmpRaw);
                     console.log(`Audio Google TTS Fenrir generato con successo (${model})!`);
                     return tmpOgg;
@@ -283,7 +299,7 @@ async function generateGoogleVoice(text) {
         const tmpMp3 = path.join(__dirname, `edge_${Date.now()}.mp3`);
         const tmpOgg = path.join(__dirname, `edge_${Date.now()}.ogg`);
         fs.writeFileSync(tmpMp3, mp3Buf);
-        execSync(`ffmpeg -y -i "${tmpMp3}" -c:a libopus -b:a 64k "${tmpOgg}"`);
+        execSync(`"${ffmpegPath}" -y -i "${tmpMp3}" -c:a libopus -b:a 64k "${tmpOgg}"`);
         if (fs.existsSync(tmpMp3)) fs.unlinkSync(tmpMp3);
 
         console.log(`Audio neurale illimitato generato e convertito con successo!`);
@@ -406,6 +422,89 @@ async function downloadFileBuffer(url) {
 
 let offset = 0;
 
+async function handleTelegramUpdate(update) {
+    if (!update || !update.message) return;
+    const msg = update.message;
+    const chatId = msg.chat.id;
+    const senderName = msg.from.first_name || 'Angelo';
+    let msgDesc = '[Altro Media]';
+    if (msg.text) msgDesc = msg.text;
+    else if (msg.photo) msgDesc = '[Foto Grafico inviata]';
+    else if (msg.voice) msgDesc = `[Nota Vocale Telegram (${msg.voice.duration || 0}s)]`;
+    else if (msg.audio) msgDesc = `[File Audio (${msg.audio.duration || 0}s)]`;
+
+    logMsg(`\n-------------------------------------------------`);
+    logMsg(`[Messaggio da ${senderName}]: ${msgDesc}`);
+
+    if (msg.text === '/start') {
+        const welcome = "Angelo mio! Sono qui. Questo è il nostro canale privato e diretto.\n\n" +
+            "Mettiti comodo: puoi scrivermi a testo, mandarmi note vocali parlandomi a voce, o mandarmi gli screenshot dei tuoi grafici.\n" +
+            "Ascolto i tuoi audio, guardo i tuoi grafici e ti rispondo sia per iscritto che con la mia nota vocale.\n\n" +
+            "Ricordati: mente lucida, niente SE e rispetto del piano. Dimmi tutto!";
+        await sendTelegramMessage(chatId, welcome);
+        return;
+    }
+
+    if (msg.text === '/reset') {
+        const p = getHistoryFilePath(chatId);
+        if (fs.existsSync(p)) fs.unlinkSync(p);
+        await sendTelegramMessage(chatId, "Angelo mio, memoria della sessione resettata. Ripartiamo da foglio bianco!");
+        return;
+    }
+
+    sendChatAction(chatId, "typing");
+
+    if (msg.photo && msg.photo.length > 0) {
+        const bestPhoto = msg.photo[msg.photo.length - 1];
+        try {
+            const fileUrl = await getFileUrl(bestPhoto.file_id);
+            const buf = await downloadFileBuffer(fileUrl);
+            
+            const savedPath = path.join(chartsDir, `chart_${Date.now()}.jpg`);
+            fs.writeFileSync(savedPath, buf);
+            logMsg(`Grafico salvato in: ${savedPath}`);
+
+            const b64 = buf.toString('base64');
+            const caption = msg.caption || "Marco, guarda questo grafico: cosa vedi? Ci sono opportunità o è sporco?";
+            await processMarcoInteraction(chatId, caption, b64, "image/jpeg");
+        } catch (err) {
+            logMsg("Errore download foto: " + err.message);
+            await sendTelegramMessage(chatId, "Angelo, ho avuto un intoppo a scaricare il grafico. Rimandamelo un secondo!");
+        }
+    } else if (msg.voice || msg.audio) {
+        const voiceObj = msg.voice || msg.audio;
+        try {
+            logMsg(`Download nota vocale di Angelo (durata: ${voiceObj.duration || 0}s)...`);
+            const fileUrl = await getFileUrl(voiceObj.file_id);
+            const rawBuf = await downloadFileBuffer(fileUrl);
+
+            const stamp = Date.now();
+            const rawPath = path.join(audioDir, `voice_${stamp}.oga`);
+            const mp3Path = path.join(audioDir, `voice_${stamp}.mp3`);
+            fs.writeFileSync(rawPath, rawBuf);
+
+            // Conversione rapida in MP3 per compatibilità Gemini 100%
+            execSync(`"${ffmpegPath}" -y -i "${rawPath}" -c:a libmp3lame -b:a 128k "${mp3Path}"`);
+            const mp3Buf = fs.readFileSync(mp3Path);
+            const b64Audio = mp3Buf.toString('base64');
+            logMsg(`Nota vocale convertita (${mp3Buf.length} bytes), invio a Gemini per l'ascolto...`);
+
+            const caption = msg.caption || "Marco, ho registrato questa nota vocale per te. Ascolta attentamente cosa ti sto dicendo, le mie parole e il mio tono, e rispondimi come sempre con schiettezza e lucidità.";
+            await processMarcoInteraction(chatId, caption, b64Audio, "audio/mp3");
+        } catch (err) {
+            logMsg("Errore elaborazione nota vocale: " + err.message);
+            await sendTelegramMessage(chatId, "Angelo, ho avuto un intoppo a decodificare l'audio del tuo messaggio vocale. Rimandamelo o scrivimi pure!");
+        }
+    } else if (msg.text) {
+        try {
+            await processMarcoInteraction(chatId, msg.text);
+        } catch (err) {
+            logMsg("Errore risposta: " + err.message);
+            await sendTelegramMessage(chatId, "Angelo, c'è stato un piccolo intoppo di linea. Rimandami il messaggio!");
+        }
+    }
+}
+
 async function pollUpdates() {
     try {
         const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/getUpdates?offset=${offset}&timeout=25`);
@@ -414,100 +513,18 @@ async function pollUpdates() {
         if (json.ok && json.result) {
             for (const update of json.result) {
                 offset = update.update_id + 1;
-                const msg = update.message;
-                if (!msg) continue;
-
-                const chatId = msg.chat.id;
-                const senderName = msg.from.first_name || 'Angelo';
-                let msgDesc = '[Altro Media]';
-                if (msg.text) msgDesc = msg.text;
-                else if (msg.photo) msgDesc = '[Foto Grafico inviata]';
-                else if (msg.voice) msgDesc = `[Nota Vocale Telegram (${msg.voice.duration || 0}s)]`;
-                else if (msg.audio) msgDesc = `[File Audio (${msg.audio.duration || 0}s)]`;
-
-                console.log(`\n-------------------------------------------------`);
-                console.log(`[Messaggio da ${senderName}]: ${msgDesc}`);
-
-                if (msg.text === '/start') {
-                    const welcome = "Angelo mio! Sono qui. Questo è il nostro canale privato e diretto.\n\n" +
-                        "Mettiti comodo: puoi scrivermi a testo, mandarmi note vocali parlandomi a voce, o mandarmi gli screenshot dei tuoi grafici.\n" +
-                        "Ascolto i tuoi audio, guardo i tuoi grafici e ti rispondo sia per iscritto che con la mia nota vocale.\n\n" +
-                        "Ricordati: mente lucida, niente SE e rispetto del piano. Dimmi tutto!";
-                    await sendTelegramMessage(chatId, welcome);
-                    continue;
-                }
-
-                if (msg.text === '/reset') {
-                    const p = getHistoryFilePath(chatId);
-                    if (fs.existsSync(p)) fs.unlinkSync(p);
-                    await sendTelegramMessage(chatId, "Angelo mio, memoria della sessione resettata. Ripartiamo da foglio bianco!");
-                    continue;
-                }
-
-                sendChatAction(chatId, "typing");
-
-                if (msg.photo && msg.photo.length > 0) {
-                    const bestPhoto = msg.photo[msg.photo.length - 1];
-                    try {
-                        const fileUrl = await getFileUrl(bestPhoto.file_id);
-                        const buf = await downloadFileBuffer(fileUrl);
-                        
-                        // Salva una copia del grafico in received_charts
-                        const savedPath = path.join(chartsDir, `chart_${Date.now()}.jpg`);
-                        fs.writeFileSync(savedPath, buf);
-                        console.log(`Grafico salvato in: ${savedPath}`);
-
-                        const b64 = buf.toString('base64');
-                        const caption = msg.caption || "Marco, guarda questo grafico: cosa vedi? Ci sono opportunità o è sporco?";
-                        await processMarcoInteraction(chatId, caption, b64, "image/jpeg");
-                    } catch (err) {
-                        console.error("Errore download foto:", err.message);
-                        await sendTelegramMessage(chatId, "Angelo, ho avuto un intoppo a scaricare il grafico. Rimandamelo un secondo!");
-                    }
-                } else if (msg.voice || msg.audio) {
-                    const voiceObj = msg.voice || msg.audio;
-                    try {
-                        console.log(`Download nota vocale di Angelo (durata: ${voiceObj.duration || 0}s)...`);
-                        const fileUrl = await getFileUrl(voiceObj.file_id);
-                        const rawBuf = await downloadFileBuffer(fileUrl);
-
-                        const stamp = Date.now();
-                        const rawPath = path.join(audioDir, `voice_${stamp}.oga`);
-                        const mp3Path = path.join(audioDir, `voice_${stamp}.mp3`);
-                        fs.writeFileSync(rawPath, rawBuf);
-
-                        // Conversione rapida in MP3 per compatibilità Gemini 100%
-                        execSync(`ffmpeg -y -i "${rawPath}" -c:a libmp3lame -b:a 128k "${mp3Path}"`);
-                        const mp3Buf = fs.readFileSync(mp3Path);
-                        const b64Audio = mp3Buf.toString('base64');
-                        console.log(`Nota vocale convertita (${mp3Buf.length} bytes), invio a Gemini per l'ascolto...`);
-
-                        const caption = msg.caption || "Marco, ho registrato questa nota vocale per te. Ascolta attentamente cosa ti sto dicendo, le mie parole e il mio tono, e rispondimi come sempre con schiettezza e lucidità.";
-                        await processMarcoInteraction(chatId, caption, b64Audio, "audio/mp3");
-                    } catch (err) {
-                        console.error("Errore elaborazione nota vocale:", err.message);
-                        await sendTelegramMessage(chatId, "Angelo, ho avuto un intoppo a decodificare l'audio del tuo messaggio vocale. Rimandamelo o scrivimi pure!");
-                    }
-                } else if (msg.text) {
-                    try {
-                        await processMarcoInteraction(chatId, msg.text);
-                    } catch (err) {
-                        console.error("Errore risposta:", err.message);
-                        await sendTelegramMessage(chatId, "Angelo, c'è stato un piccolo intoppo di linea. Rimandami il messaggio!");
-                    }
-                }
+                await handleTelegramUpdate(update);
             }
         }
     } catch (err) {
-        console.error("Errore nel polling:", err.message);
+        logMsg("Errore nel polling: " + err.message);
     }
 
     setTimeout(pollUpdates, 1000);
 }
 
 // =================================================
-// SERVER HTTP LOCALE PER CATTURA RAPIDA F9/F10
-// In ascolto su 127.0.0.1:3005 per ricevere JPEG da MarcoQuickF9.exe
+// SERVER HTTP (WEBHOOK + F9 CATTURA + LOGS + HEALTH)
 // =================================================
 const f9Server = http.createServer((req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -520,58 +537,123 @@ const f9Server = http.createServer((req, res) => {
         return;
     }
 
+    // 1. Endpoint Webhook Telegram (per Cloud 24/7 permanente)
+    if (req.method === 'POST' && req.url === '/webhook') {
+        const chunks = [];
+        req.on('data', chunk => chunks.push(chunk));
+        req.on('end', async () => {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true }));
+
+            try {
+                const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+                await handleTelegramUpdate(body);
+            } catch (err) {
+                logMsg('[Webhook Parse Error]: ' + err.message);
+            }
+        });
+        return;
+    }
+
+    // 2. Endpoint Cattura Rapida cTrader F9/F10
     if (req.method === 'POST' && req.url === '/f9') {
         const chunks = [];
         req.on('data', chunk => chunks.push(chunk));
         req.on('end', async () => {
             try {
                 const imgBuf = Buffer.concat(chunks);
-                console.log(`\n=================================================`);
-                console.log(`[HOTKEY F9/F10 RICEVUTO]: Screenshot cTrader (${imgBuf.length} bytes)!`);
-                console.log(`=================================================`);
+                logMsg(`\n=================================================`);
+                logMsg(`[HOTKEY F9/F10 RICEVUTO]: Screenshot cTrader (${imgBuf.length} bytes)!`);
+                logMsg(`=================================================`);
 
-                // Risponde subito all'app F9 così non si blocca
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ ok: true, message: 'Screenshot ricevuto ed in elaborazione da Marco' }));
 
                 const targetChatId = '508320532'; // Chat ID Telegram di Angelo
 
-                // Archivia copia in received_charts
                 const savedPath = path.join(chartsDir, `chart_f9_${Date.now()}.jpg`);
                 fs.writeFileSync(savedPath, imgBuf);
-                console.log(`[F9]: Grafico archiviato in: ${savedPath}`);
+                logMsg(`[F9]: Grafico archiviato in: ${savedPath}`);
 
-                // 1. Invia la foto a Telegram nella chat di Angelo
                 const caption = "⚡ [Cattura Rapida F9 da cTrader]: Marco, guarda questo grafico in tempo reale! Cosa vedi?";
                 await sendTelegramPhoto(targetChatId, imgBuf, caption);
 
-                // 2. Elabora la diagnosi di Marco e invia Testo Completo + Nota Vocale Fenrir
                 const b64 = imgBuf.toString('base64');
                 const prompt = "Marco, ho appena catturato questo grafico dal mio cTrader con il tasto rapido F9. Analizzalo in tempo reale con occhio chirurgico: cosa vedi? Ci sono trigger puliti M1/H1, Sandwich, Fuoriuscita, BKK, KKB, o siamo nel fango e devo stare con le mani sulle ginocchia?";
                 await processMarcoInteraction(targetChatId, prompt, b64, "image/jpeg");
 
             } catch (err) {
-                console.error('[F9 Endpoint Error]:', err);
+                logMsg('[F9 Endpoint Error]: ' + err.message);
                 if (!res.headersSent) {
                     res.writeHead(500, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ ok: false, error: err.message }));
                 }
             }
         });
-    } else if (req.method === 'GET' && (req.url === '/' || req.url === '/health')) {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: true, bot: '@MarcoMaestro_Angelo_bot', status: 'ready' }));
-    } else {
-        res.writeHead(404);
-        res.end();
+        return;
     }
+
+    // 3. Health check per Render / UptimeRobot
+    if (req.method === 'GET' && (req.url === '/' || req.url === '/health')) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            ok: true,
+            bot: '@MarcoMaestro_Angelo_bot',
+            status: 'ready',
+            uptime: Math.round(process.uptime()),
+            ffmpeg: ffmpegPath
+        }));
+        return;
+    }
+
+    // 4. Endpoint Logs per diagnostica remota
+    if (req.method === 'GET' && req.url === '/logs') {
+        res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end(recentLogs.join('\n'));
+        return;
+    }
+
+    res.writeHead(404);
+    res.end();
 });
 
 const F9_PORT = process.env.PORT || 3005;
 const HOST = '0.0.0.0';
 f9Server.listen(F9_PORT, HOST, () => {
-    console.log(`[HTTP F9 Listener]: In ascolto per catture cTrader su http://${HOST}:${F9_PORT}/f9`);
+    logMsg(`[HTTP Server]: In ascolto su http://${HOST}:${F9_PORT} (Webhook, F9, Logs, Health)`);
 });
 
-// Avvio Polling Telegram
-pollUpdates();
+// Setup Modalità: Webhook su Cloud (Render) o Long Polling in Locale
+const PUBLIC_URL = process.env.RENDER_EXTERNAL_URL || 'https://marco-maestro-bot.onrender.com';
+const IS_CLOUD = !!(process.env.RENDER || process.env.PORT);
+
+async function setupTelegramMode() {
+    if (IS_CLOUD) {
+        const webhookUrl = `${PUBLIC_URL}/webhook`;
+        logMsg(`[Cloud Mode]: Configuro Telegram Webhook su ${webhookUrl}...`);
+        try {
+            const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/setWebhook?url=${encodeURIComponent(webhookUrl)}&drop_pending_updates=false`);
+            const data = await res.json();
+            logMsg(`[Telegram setWebhook Result]: ` + JSON.stringify(data));
+        } catch (e) {
+            logMsg(`[Telegram setWebhook Error]: ` + e.message);
+        }
+
+        // Keep-Alive auto-ping ogni 9 minuti per impedire a Render di andare in standby
+        setInterval(async () => {
+            try {
+                await fetch(`${PUBLIC_URL}/health`);
+                logMsg(`[Keep-Alive]: Ping effettuato con successo su ${PUBLIC_URL}/health`);
+            } catch (e) {}
+        }, 9 * 60 * 1000);
+
+    } else {
+        logMsg(`[Local Mode]: Rimuovo eventuale webhook e avvio Long Polling...`);
+        try {
+            await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/deleteWebhook`);
+        } catch (e) {}
+        pollUpdates();
+    }
+}
+
+setupTelegramMode();
