@@ -157,11 +157,10 @@ async function getMarcoResponse(chatId, userText, base64Media = null, mimeType =
 
     // Modelli: 3.8-flash primario, poi 3.5-flash e 3-flash (massima profondità di ragionamento con thinking nativo)
     const candidateModels = [
-        { name: 'gemini-3.8-flash', timeout: 15000 },
+        { name: 'gemini-3.8-flash', timeout: 40000 },
+        { name: 'gemini-3.1-flash-lite', timeout: 35000 },
         { name: 'gemini-3.5-flash', timeout: 35000 },
-        { name: 'gemini-3-flash-preview', timeout: 35000 },
-        { name: 'gemini-3.7-flash', timeout: 15000 },
-        { name: 'gemini-3.1-flash-lite', timeout: 25000 }
+        { name: 'gemini-3-flash-preview', timeout: 35000 }
     ];
 
     let replyText = null;
